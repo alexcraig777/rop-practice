@@ -1,0 +1,4 @@
+GitPython
+colorama>=0.4.4
+dploy>=0.1.2
+wget
